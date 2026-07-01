@@ -1,34 +1,21 @@
 'use strict';
-// ================================================================
-//  SA'DA H2O — DigitalOcean SMS Relay  v2
-//  Handles TWO things:
-//   1. POST /send    — legacy single-SMS relay (SADA.co sender, unchanged)
-//   2. POST /campaign — new bulk send loop for the marketing platform
-//      receives full contact list from Vercel, sends one by one,
-//      writes results back to Supabase directly.
-// ================================================================
+const https   = require('https');
+const fs      = require('fs');
+const crypto  = require('crypto');
 
-const https  = require('https');
-const http   = require('http');
-const fs     = require('fs');
-const crypto = require('crypto');
-
-// ── Config ────────────────────────────────────────────────────
 const TAQNYAT_TOKEN   = process.env.TAQNYAT_TOKEN  || '91a952e3a8a20842b6ac9c139bf04a38';
-const TAQNYAT_SENDER  = process.env.TAQNYAT_SENDER || 'SADA.Co-AD';  // marketing campaigns
-const RELAY_SENDER    = process.env.RELAY_SENDER   || 'SADA.co';      // legacy /send — unchanged
+const TAQNYAT_SENDER  = process.env.TAQNYAT_SENDER || 'SADA.Co-AD';
+const RELAY_SENDER    = process.env.RELAY_SENDER   || 'SADA.co';
 const SUPABASE_URL    = process.env.SUPABASE_URL;
-const SUPABASE_KEY    = process.env.SUPABASE_SERVICE_KEY;             // service key for writing logs
-const SHARED_SECRET   = process.env.RELAY_SECRET   || '';             // optional auth header from Vercel
+const SUPABASE_KEY    = process.env.SUPABASE_SERVICE_KEY;
+const RELAY_SECRET    = process.env.RELAY_SECRET   || '';
 const PORT            = 443;
 const BATCH_SIZE      = 50;
 const BATCH_DELAY_MS  = 1200;
 const COST_PER_SMS    = 0.06;
+const SSL_KEY         = process.env.SSL_KEY  || '/root/sms-relay/key.pem';
+const SSL_CERT        = process.env.SSL_CERT || '/root/sms-relay/cert.pem';
 
-const SSL_KEY  = process.env.SSL_KEY  || '/root/sms-relay/key.pem';
-const SSL_CERT = process.env.SSL_CERT || '/root/sms-relay/cert.pem';
-
-// ── Helpers ────────────────────────────────────────────────────
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function normMobile(m) {
@@ -63,7 +50,6 @@ function jsonRes(res, status, data) {
   res.end(JSON.stringify(data));
 }
 
-// ── Taqnyat call ───────────────────────────────────────────────
 async function callTaqnyat(sender, mobile, message) {
   const r = await fetch('https://api.taqnyat.sa/v1/messages', {
     method:  'POST',
@@ -75,7 +61,6 @@ async function callTaqnyat(sender, mobile, message) {
   return { ok, msgId: data?.messages?.[0]?.messageId || '' };
 }
 
-// ── Supabase writer ────────────────────────────────────────────
 async function supabaseInsertLog(log) {
   if (!SUPABASE_URL || !SUPABASE_KEY) return;
   await fetch(`${SUPABASE_URL}/rest/v1/send_logs`, {
@@ -103,10 +88,8 @@ async function supabaseUpdateCampaign(id, delivered, failed, cost) {
   }).catch(() => {});
 }
 
-// ── Bulk campaign send (runs fully async after 202 response) ───
 async function runCampaign({ campaignId, contacts, lang, body_ar, body_en }) {
   let delivered = 0, failed = 0;
-
   for (let i = 0; i < contacts.length; i += BATCH_SIZE) {
     const batch = contacts.slice(i, i + BATCH_SIZE);
     for (const contact of batch) {
@@ -114,43 +97,30 @@ async function runCampaign({ campaignId, contacts, lang, body_ar, body_en }) {
         const mobile  = normMobile(contact.mobile);
         const message = buildMessage(body_ar || '', body_en || '', lang || 'both', contact);
         const { ok, msgId } = await callTaqnyat(TAQNYAT_SENDER, mobile, message);
-
         await supabaseInsertLog({
-          id:          crypto.randomUUID(),
-          campaign_id: campaignId,
-          contact_id:  contact.id || '',
-          mobile,
-          name:        contact.name || '',
-          status:      ok ? 'delivered' : 'failed',
-          taqnyat_id:  msgId,
-          sent_at:     new Date().toISOString(),
+          id: crypto.randomUUID(), campaign_id: campaignId,
+          contact_id: contact.id || '', mobile, name: contact.name || '',
+          status: ok ? 'delivered' : 'failed', taqnyat_id: msgId,
+          sent_at: new Date().toISOString(),
         });
-
         if (ok) delivered++; else failed++;
       } catch(e) {
         await supabaseInsertLog({
-          id:          crypto.randomUUID(),
-          campaign_id: campaignId,
-          contact_id:  contact.id || '',
-          mobile:      contact.mobile || '',
-          name:        contact.name || '',
-          status:      'error',
-          taqnyat_id:  '',
-          sent_at:     new Date().toISOString(),
+          id: crypto.randomUUID(), campaign_id: campaignId,
+          contact_id: contact.id || '', mobile: contact.mobile || '', name: contact.name || '',
+          status: 'error', taqnyat_id: '', sent_at: new Date().toISOString(),
         });
         failed++;
       }
     }
     if (i + BATCH_SIZE < contacts.length) await sleep(BATCH_DELAY_MS);
   }
-
   const smsPerContact = lang === 'both' ? 2 : 1;
   const cost = parseFloat((delivered * smsPerContact * COST_PER_SMS).toFixed(2));
   await supabaseUpdateCampaign(campaignId, delivered, failed, cost);
-  console.log(`Campaign ${campaignId} done — ${delivered} delivered, ${failed} failed, SAR ${cost}`);
+  console.log(`Campaign ${campaignId} done -- ${delivered} delivered, ${failed} failed, SAR ${cost}`);
 }
 
-// ── Request handler ────────────────────────────────────────────
 async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin',  '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
@@ -158,42 +128,34 @@ async function handler(req, res) {
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
   if (req.method !== 'POST')    { jsonRes(res, 405, { error: 'Method not allowed' }); return; }
 
-  // Optional shared secret verification (set same value in Vercel env + DO .env)
-  if (SHARED_SECRET && req.url === '/campaign') {
+  if (RELAY_SECRET && req.url === '/campaign') {
     const provided = req.headers['x-relay-secret'] || '';
-    if (provided !== SHARED_SECRET) { jsonRes(res, 401, { error: 'Unauthorized' }); return; }
+    if (provided !== RELAY_SECRET) { jsonRes(res, 401, { error: 'Unauthorized' }); return; }
   }
 
   try {
     const body = await readBody(req);
 
-    // ── POST /send  (legacy relay — unchanged) ─────────────────
     if (req.url === '/send' || req.url === '/') {
       const { to, body: smsBody } = body;
       if (!to || !smsBody) { jsonRes(res, 400, { error: 'Missing to or body' }); return; }
-      const { ok, ...rest } = await callTaqnyat(RELAY_SENDER, normMobile(to), smsBody);
-      jsonRes(res, 200, rest);
+      const { ok, msgId } = await callTaqnyat(RELAY_SENDER, normMobile(to), smsBody);
+      jsonRes(res, 200, { ok, msgId });
       return;
     }
 
-    // ── POST /campaign  (new bulk send) ────────────────────────
     if (req.url === '/campaign') {
       const { campaignId, contacts, lang, body_ar, body_en } = body;
       if (!campaignId || !contacts?.length) {
         jsonRes(res, 400, { error: 'Missing campaignId or contacts' });
         return;
       }
-
-      // Respond immediately — bulk loop runs in background
       jsonRes(res, 202, { ok: true, queued: contacts.length });
-
-      // Start async (no await — fire and forget)
       runCampaign({ campaignId, contacts, lang, body_ar, body_en })
         .catch(e => console.error('Campaign error:', e.message));
       return;
     }
 
-    // ── Health check ───────────────────────────────────────────
     if (req.url === '/health') {
       jsonRes(res, 200, { ok: true, ts: new Date().toISOString() });
       return;
@@ -206,15 +168,14 @@ async function handler(req, res) {
   }
 }
 
-// ── Start server ───────────────────────────────────────────────
 const sslOptions = {
   key:  fs.readFileSync(SSL_KEY),
   cert: fs.readFileSync(SSL_CERT),
 };
 
 https.createServer(sslOptions, handler).listen(PORT, () => {
-  console.log(`SA'DA H2O relay running on HTTPS port ${PORT}`);
-  console.log(`Campaign sender: ${TAQNYAT_SENDER}`);
-  console.log(`Legacy sender:   ${RELAY_SENDER}`);
-  console.log(`Supabase:        ${SUPABASE_URL ? 'connected' : 'NOT configured'}`);
+  console.log("SA'DA H2O relay running on HTTPS port " + PORT);
+  console.log('Campaign sender: ' + TAQNYAT_SENDER);
+  console.log('Relay sender:    ' + RELAY_SENDER);
+  console.log('Supabase:        ' + (SUPABASE_URL ? 'connected' : 'NOT configured'));
 });
