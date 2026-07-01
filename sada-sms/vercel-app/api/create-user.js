@@ -1,31 +1,26 @@
 // api/create-user.js
-// Creates a new Supabase auth user + profile row.
-// Must use SUPABASE_SERVICE_KEY (admin privileges).
+const { createClient } = require('@supabase/supabase-js')
 
-import { createClient } from '@supabase/supabase-js'
-
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-)
-
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' })
 
   const { email, password, full_name, role } = req.body
   if (!email || !password) return res.status(400).json({ error: 'Email and password required' })
   if (password.length < 8)  return res.status(400).json({ error: 'Password must be at least 8 characters' })
 
+  const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY
+  )
+
   try {
-    // Create the auth user
     const { data: authData, error: authErr } = await supabase.auth.admin.createUser({
       email,
       password,
-      email_confirm: true,  // skip email verification for internal tool
+      email_confirm: true,
     })
     if (authErr) throw authErr
 
-    // Upsert profile
     const { error: profErr } = await supabase.from('profiles').upsert({
       id:         authData.user.id,
       email,
