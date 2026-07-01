@@ -19,6 +19,7 @@ const SSL_CERT        = process.env.SSL_CERT || '/root/sms-relay/cert.pem';
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 function normMobile(m) {
+  if (!m) return '';
   let n = String(m).replace(/\D/g, '');
   if (n.startsWith('00966')) n = n.slice(2);
   if (n.startsWith('0'))     n = '966' + n.slice(1);
@@ -27,9 +28,12 @@ function normMobile(m) {
 }
 
 function buildMessage(body_ar, body_en, lang, contact) {
-  let msg = lang === 'ar' ? body_ar
-          : lang === 'en' ? body_en
-          : [body_ar, body_en].filter(Boolean).join('\n\n');
+  const ar  = body_ar || '';
+  const en  = body_en || '';
+  let msg = lang === 'ar' ? ar
+          : lang === 'en' ? en
+          : [ar, en].filter(Boolean).join('\n\n');
+  if (!msg) msg = ar || en || '';
   return msg
     .replace(/\{\{name\}\}/g, contact.name || 'عميلنا الكريم')
     .replace(/\{\{city\}\}/g, contact.city || '')
