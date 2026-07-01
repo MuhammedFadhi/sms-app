@@ -5,15 +5,26 @@ const COST = 0.06
 const fmt  = n => Number(n||0).toLocaleString()
 const fmtC = n => 'SAR ' + Number(n||0).toFixed(2)
 
+function normMobile(m) {
+  let n = String(m).replace(/\D/g, '')
+  if (n.startsWith('00966')) n = n.slice(2)
+  if (n.startsWith('0'))     n = '966' + n.slice(1)
+  if (!n.startsWith('966'))  n = '966' + n
+  return n
+}
+
 export default function Compose() {
-  const [templates, setTemplates]   = useState([])
-  const [contactCounts, setCounts]  = useState({ all:0, Customer:0, Lead:0, VIP:0 })
-  const [form, setForm]             = useState({ name:'', list:'all', lang:'both', useTemplate:true, templateId:'', customAr:'', customEn:'' })
-  const [msgAr, setMsgAr]           = useState('')
-  const [msgEn, setMsgEn]           = useState('')
-  const [sending, setSending]       = useState(false)
-  const [result, setResult]         = useState(null)
-  const [alert, setAlert]           = useState(null)
+  const [mode, setMode]              = useState('bulk')   // 'bulk' | 'single'
+  const [templates, setTemplates]    = useState([])
+  const [contactCounts, setCounts]   = useState({ all:0, Customer:0, Lead:0, VIP:0 })
+  const [form, setForm]              = useState({ name:'', list:'all', lang:'both', useTemplate:true, templateId:'' })
+  const [msgAr, setMsgAr]            = useState('')
+  const [msgEn, setMsgEn]            = useState('')
+  // Single send
+  const [single, setSingle]          = useState({ name:'', mobile:'' })
+  const [sending, setSending]        = useState(false)
+  const [result, setResult]          = useState(null)
+  const [alert, setAlert]            = useState(null)
 
   useEffect(() => {
     supabase.from('templates').select('*').order('category').order('name').then(r => setTemplates(r.data||[]))
@@ -35,55 +46,77 @@ export default function Compose() {
     setMsgEn(t.body_en || '')
   }
 
-  const recipientCount = contactCounts[form.list] || 0
-  const arSms   = form.lang !== 'en' ? (Math.ceil(msgAr.length/70)||1) : 0
-  const enSms   = form.lang !== 'ar' ? (Math.ceil(msgEn.length/160)||1) : 0
-  const smsEach = form.lang === 'both' ? arSms + enSms : form.lang === 'ar' ? arSms : enSms
+  const recipientCount = mode === 'single' ? (single.mobile ? 1 : 0) : (contactCounts[form.list] || 0)
+  const arSms    = form.lang !== 'en' ? (Math.ceil(msgAr.length/70)||1) : 0
+  const enSms    = form.lang !== 'ar' ? (Math.ceil(msgEn.length/160)||1) : 0
+  const smsEach  = form.lang === 'both' ? arSms + enSms : form.lang === 'ar' ? arSms : enSms
   const totalSms = recipientCount * (smsEach || 1)
   const estCost  = totalSms * COST
 
+  function resetForm() {
+    setResult(null)
+    setForm({ name:'', list:'all', lang:'both', useTemplate:true, templateId:'' })
+    setMsgAr(''); setMsgEn('')
+    setSingle({ name:'', mobile:'' })
+    setAlert(null)
+  }
+
   async function send() {
     setAlert(null)
-    if (!form.name.trim())     { setAlert({ type:'error', msg:'Enter a campaign name' }); return }
-    if (!msgAr && !msgEn)      { setAlert({ type:'error', msg:'Write a message or select a template' }); return }
-    if (recipientCount === 0)  { setAlert({ type:'error', msg:'No active contacts in selected list' }); return }
-    if (!confirm(`Send to ${fmt(recipientCount)} contacts?\nEstimated cost: ${fmtC(estCost)}`)) return
+
+    // Validate
+    if (!form.name.trim()) { setAlert({ type:'error', msg:'Enter a campaign name' }); return }
+    if (!msgAr && !msgEn)  { setAlert({ type:'error', msg:'Write a message or select a template' }); return }
+
+    if (mode === 'single') {
+      if (!single.mobile) { setAlert({ type:'error', msg:'Enter a mobile number' }); return }
+    } else {
+      if (recipientCount === 0) { setAlert({ type:'error', msg:'No active contacts in selected list' }); return }
+    }
+
+    if (!confirm(`Send to ${fmt(recipientCount)} recipient${recipientCount>1?'s':''}?\nEst. cost: ${fmtC(estCost)}`)) return
 
     setSending(true)
     try {
-      // 1. Create campaign record in Supabase
+      let contacts = []
+
+      if (mode === 'single') {
+        contacts = [{ id: '', name: single.name || 'عميلنا الكريم', mobile: normMobile(single.mobile) }]
+      } else {
+        let q = supabase.from('contacts').select('id, name, mobile').eq('opt_out', false)
+        if (form.list !== 'all') q = q.eq('type', form.list)
+        const { data } = await q
+        contacts = data || []
+      }
+
+      // Create campaign record
       const { data: camp, error: campErr } = await supabase.from('campaigns').insert({
         name:        form.name.trim(),
         template_id: form.templateId || null,
-        list_filter: form.list,
+        list_filter: mode === 'single' ? 'single' : form.list,
         lang:        form.lang,
-        total:       recipientCount,
+        total:       contacts.length,
         delivered:   0,
         failed:      0,
         cost:        0,
       }).select().single()
       if (campErr) throw campErr
 
-      // 2. Fetch contacts
-      let q = supabase.from('contacts').select('id, name, mobile').eq('opt_out', false)
-      if (form.list !== 'all') q = q.eq('type', form.list)
-      const { data: contacts } = await q
-
-      // 3. Hand off to DO relay — it handles the bulk loop and updates Supabase
+      // Hand off to DO relay
       const res = await fetch('/api/send-campaign', {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({
           campaignId: camp.id,
-          contacts:   contacts || [],
-          lang:       form.lang,
-          body_ar:    msgAr,
-          body_en:    msgEn,
+          contacts,
+          lang:    form.lang,
+          body_ar: msgAr,
+          body_en: msgEn,
         }),
       })
       if (!res.ok) { const d = await res.json(); throw new Error(d.error || 'Send failed') }
 
-      setResult({ campaignId: camp.id, total: recipientCount })
+      setResult({ campaignId: camp.id, total: contacts.length, single: mode === 'single' })
     } catch(e) {
       setAlert({ type:'error', msg: e.message })
     } finally {
@@ -95,13 +128,17 @@ export default function Compose() {
     <div className="page-content">
       <div className="card" style={{textAlign:'center',padding:48}}>
         <div style={{fontSize:48,marginBottom:16}}>✅</div>
-        <div style={{fontSize:20,fontWeight:700,marginBottom:8}}>Campaign queued!</div>
-        <div style={{color:'var(--ink-2)',fontSize:13,marginBottom:24}}>
-          Sending to {fmt(result.total)} contacts in the background.<br/>
-          Check Reports for live delivery status.
+        <div style={{fontSize:20,fontWeight:700,marginBottom:8}}>
+          {result.single ? 'Message sent!' : 'Campaign queued!'}
         </div>
-        <button className="btn btn-primary" onClick={() => { setResult(null); setForm({name:'',list:'all',lang:'both',useTemplate:true,templateId:'',customAr:'',customEn:''}); setMsgAr(''); setMsgEn('') }}>
-          New campaign
+        <div style={{color:'var(--ink-2)',fontSize:13,marginBottom:24}}>
+          {result.single
+            ? 'Your message has been sent successfully.'
+            : <>Sending to {fmt(result.total)} contacts in the background.<br/>Check Reports for live delivery status.</>
+          }
+        </div>
+        <button className="btn btn-primary" onClick={resetForm}>
+          {result.single ? 'Send another' : 'New campaign'}
         </button>
       </div>
     </div>
@@ -109,34 +146,85 @@ export default function Compose() {
 
   return (
     <div className="page-content">
+      {/* Mode switcher */}
+      <div style={{display:'flex',gap:8,marginBottom:18}}>
+        <button
+          className={`btn ${mode==='bulk'?'btn-primary':''}`}
+          onClick={() => { setMode('bulk'); setAlert(null) }}
+        >
+          <i className="ti ti-users"/>Bulk campaign
+        </button>
+        <button
+          className={`btn ${mode==='single'?'btn-primary':''}`}
+          onClick={() => { setMode('single'); setAlert(null) }}
+        >
+          <i className="ti ti-user"/>Single contact
+        </button>
+      </div>
+
       {alert && <div className={`alert alert-${alert.type}`}><i className={`ti ti-${alert.type==='error'?'alert-circle':'info-circle'}`}/>{alert.msg}</div>}
 
       <div className="compose-layout">
         <div>
-          {/* Campaign details */}
+          {/* Campaign / send details */}
           <div className="card">
-            <div className="card-head"><div className="card-title"><i className="ti ti-speakerphone"/>Campaign details</div></div>
-            <div className="card-body">
-              <div className="form-group"><label className="form-label">Campaign name</label>
-                <input className="form-input" value={form.name} onChange={e=>setForm({...form,name:e.target.value})} placeholder="e.g. Eid Al-Fitr 2026"/>
+            <div className="card-head">
+              <div className="card-title">
+                <i className={`ti ${mode==='single'?'ti-user':'ti-speakerphone'}`}/>
+                {mode === 'single' ? 'Recipient' : 'Campaign details'}
               </div>
-              <div className="grid-2">
-                <div className="form-group"><label className="form-label">Send to</label>
-                  <select className="form-select" value={form.list} onChange={e=>setForm({...form,list:e.target.value})}>
-                    <option value="all">All contacts ({fmt(contactCounts.all)})</option>
-                    <option value="Customer">Customers ({fmt(contactCounts.Customer)})</option>
-                    <option value="Lead">Leads ({fmt(contactCounts.Lead)})</option>
-                    <option value="VIP">VIP ({fmt(contactCounts.VIP)})</option>
-                  </select>
+            </div>
+            <div className="card-body">
+              <div className="form-group">
+                <label className="form-label">{mode === 'single' ? 'Reference / label' : 'Campaign name'}</label>
+                <input className="form-input" value={form.name} onChange={e=>setForm({...form,name:e.target.value})}
+                  placeholder={mode === 'single' ? 'e.g. Follow-up — Ahmed Al-Ghamdi' : 'e.g. Eid Al-Fitr 2026'}/>
+              </div>
+
+              {mode === 'single' ? (
+                <div className="grid-2">
+                  <div className="form-group">
+                    <label className="form-label">Name (optional)</label>
+                    <input className="form-input" value={single.name} onChange={e=>setSingle({...single,name:e.target.value})} placeholder="Recipient name"/>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Mobile number</label>
+                    <input className="form-input" value={single.mobile} onChange={e=>setSingle({...single,mobile:e.target.value})} placeholder="05XXXXXXXX"/>
+                    {single.mobile && <div className="form-hint">Will send to: {normMobile(single.mobile)}</div>}
+                  </div>
                 </div>
-                <div className="form-group"><label className="form-label">Language</label>
+              ) : (
+                <div className="grid-2">
+                  <div className="form-group">
+                    <label className="form-label">Send to</label>
+                    <select className="form-select" value={form.list} onChange={e=>setForm({...form,list:e.target.value})}>
+                      <option value="all">All contacts ({fmt(contactCounts.all)})</option>
+                      <option value="Customer">Customers ({fmt(contactCounts.Customer)})</option>
+                      <option value="Lead">Leads ({fmt(contactCounts.Lead)})</option>
+                      <option value="VIP">VIP ({fmt(contactCounts.VIP)})</option>
+                    </select>
+                  </div>
+                  <div className="form-group">
+                    <label className="form-label">Language</label>
+                    <div className="lang-toggle">
+                      {[['both','AR + EN'],['ar','AR only'],['en','EN only']].map(([v,l]) => (
+                        <div key={v} className={`lang-opt ${form.lang===v?'active':''}`} onClick={()=>setForm({...form,lang:v})}>{l}</div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {mode === 'single' && (
+                <div className="form-group">
+                  <label className="form-label">Language</label>
                   <div className="lang-toggle">
                     {[['both','AR + EN'],['ar','AR only'],['en','EN only']].map(([v,l]) => (
                       <div key={v} className={`lang-opt ${form.lang===v?'active':''}`} onClick={()=>setForm({...form,lang:v})}>{l}</div>
                     ))}
                   </div>
                 </div>
-              </div>
+              )}
             </div>
           </div>
 
@@ -165,7 +253,7 @@ export default function Compose() {
               )}
               <div className="alert alert-info" style={{fontSize:11.5}}>
                 <i className="ti ti-info-circle"/>
-                Use <code style={{background:'rgba(23,184,208,.15)',padding:'1px 5px',borderRadius:3,fontSize:10.5}}>{'{{name}}'}</code> to personalize each message with the recipient's name.
+                Use <code style={{background:'rgba(23,184,208,.15)',padding:'1px 5px',borderRadius:3,fontSize:10.5}}>{'{{name}}'}</code> to personalize with the recipient's name.
               </div>
               {form.lang !== 'en' && (
                 <div className="form-group">
@@ -195,10 +283,10 @@ export default function Compose() {
                 <div className="phone-screen">
                   <div className="phone-from">SADA.Co-AD</div>
                   {msgAr && form.lang !== 'en' && (
-                    <div className="sms-bubble rtl">{msgAr.replace(/\{\{name\}\}/g,'عميلنا الكريم')}</div>
+                    <div className="sms-bubble rtl">{msgAr.replace(/\{\{name\}\}/g, single.name || 'عميلنا الكريم')}</div>
                   )}
                   {msgEn && form.lang !== 'ar' && (
-                    <div className="sms-bubble">{msgEn.replace(/\{\{name\}\}/g,'Valued Customer')}</div>
+                    <div className="sms-bubble">{msgEn.replace(/\{\{name\}\}/g, single.name || 'Valued Customer')}</div>
                   )}
                   {!msgAr && !msgEn && (
                     <div style={{fontSize:9.5,color:'#aaa',textAlign:'center',padding:'20px 0'}}>Preview will appear here</div>
@@ -210,16 +298,21 @@ export default function Compose() {
 
           <div className="send-summary">
             {[
-              ['Recipients',       fmt(recipientCount)     ],
-              ['SMS per recipient', smsEach || '—'         ],
-              ['Total messages',   fmt(totalSms)           ],
-              ['Sender ID',        'SADA.Co-AD'            ],
-              ['Est. cost',        fmtC(estCost)           ],
+              ['Recipient',        mode==='single' ? (single.mobile ? normMobile(single.mobile) : '—') : fmt(recipientCount) + ' contacts'],
+              ['SMS per recipient', smsEach || '—'],
+              ['Total messages',   fmt(totalSms)],
+              ['Sender ID',        'SADA.Co-AD'],
+              ['Est. cost',        fmtC(estCost)],
             ].map(([l,v]) => (
               <div key={l} className="summary-row"><span className="summary-label">{l}</span><span className="summary-value">{v}</span></div>
             ))}
             <button className="send-btn" onClick={send} disabled={sending || recipientCount === 0}>
-              {sending ? <><span className="spinner"/>Sending…</> : <><i className="ti ti-send"/>Send to {fmt(recipientCount)} contacts</>}
+              {sending
+                ? <><span className="spinner"/>Sending…</>
+                : mode === 'single'
+                  ? <><i className="ti ti-send"/>Send message</>
+                  : <><i className="ti ti-send"/>Send to {fmt(recipientCount)} contacts</>
+              }
             </button>
           </div>
         </div>
