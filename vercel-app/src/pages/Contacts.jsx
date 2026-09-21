@@ -53,14 +53,18 @@ export default function Contacts() {
     const { data } = await q
     setContacts(data || [])
 
-    const all = (await supabase.from('contacts').select('type, opt_out')).data || []
-    setStats({
-      total:     all.length,
-      customers: all.filter(c=>c.type==='Customer').length,
-      leads:     all.filter(c=>c.type==='Lead').length,
-      vip:       all.filter(c=>c.type==='VIP').length,
-      opted_out: all.filter(c=>c.opt_out).length,
-    })
+    const countOf = async apply => {
+      const { count } = await apply(supabase.from('contacts').select('*', { count: 'exact', head: true }))
+      return count || 0
+    }
+    const [total, customers, leads, vip, opted_out] = await Promise.all([
+      countOf(q => q),
+      countOf(q => q.eq('type', 'Customer')),
+      countOf(q => q.eq('type', 'Lead')),
+      countOf(q => q.eq('type', 'VIP')),
+      countOf(q => q.eq('opt_out', true)),
+    ])
+    setStats({ total, customers, leads, vip, opted_out })
   }, [filter, search, city])
 
   useEffect(() => { load() }, [load])
