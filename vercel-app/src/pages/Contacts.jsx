@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { supabase } from '../supabase'
 import Modal from '../components/Modal'
 
@@ -41,6 +41,8 @@ export default function Contacts() {
   const [addForm, setAddForm]   = useState({ name:'', mobile:'', city:'', type:'Customer', notes:'' })
   const [loading, setLoading]   = useState(false)
   const [alert, setAlert]       = useState(null)
+  const [report, setReport]     = useState(null)
+  const analyzeRun              = useRef(0)
 
   const load = useCallback(async () => {
     let q = supabase.from('contacts').select('*').order('created_at', { ascending: false })
@@ -78,17 +80,59 @@ export default function Contacts() {
     setLoading(false)
   }
 
+  async function analyze(rows) {
+    const run = ++analyzeRun.current
+    if (!rows.length) { setReport(null); return }
+    setReport({ checking: true })
+    await new Promise(r => setTimeout(r, 300))
+    if (run !== analyzeRun.current) return
+
+    const seen = new Set(), fresh = [], fileDupes = []
+    rows.forEach(r => {
+      const mobile = normMobile(r.mobile)
+      if (seen.has(mobile)) fileDupes.push({ ...r, mobile })
+      else { seen.add(mobile); fresh.push({ ...r, mobile }) }
+    })
+
+    const existingByMobile = new Map()
+    const mobiles = fresh.map(r => r.mobile)
+    for (let i = 0; i < mobiles.length; i += 200) {
+      const { data, error } = await supabase.from('contacts').select('mobile, name').in('mobile', mobiles.slice(i, i + 200))
+      if (run !== analyzeRun.current) return
+      if (error) { setReport(null); setAlert({ type:'error', msg: 'Could not check for duplicates: ' + error.message }); return }
+      ;(data || []).forEach(d => existingByMobile.set(d.mobile, d.name))
+    }
+
+    setReport({
+      checking:  false,
+      fresh:     fresh.filter(r => !existingByMobile.has(r.mobile)),
+      existing:  fresh.filter(r => existingByMobile.has(r.mobile)).map(r => ({ ...r, existingName: existingByMobile.get(r.mobile) })),
+      fileDupes,
+    })
+  }
+
+  function handleRows(rows) {
+    setImportRows(rows)
+    analyze(rows)
+  }
+
+  function closeImport() {
+    analyzeRun.current++
+    setModal(null); setImportText(''); setImportRows([]); setReport(null); setAlert(null)
+  }
+
   async function doImport() {
-    const rows = importTab === 'paste' ? importRows : importRows
-    if (!rows.length) { setAlert({ type:'error', msg:'No valid rows found' }); return }
+    const rows = report?.fresh || []
+    if (!rows.length) { setAlert({ type:'error', msg:'No new contacts to import' }); return }
     setLoading(true); setAlert(null)
-    const inserts = rows.map(r => ({ ...r, mobile: normMobile(r.mobile), opt_out: false }))
-    const { data, error } = await supabase.from('contacts').upsert(inserts, { onConflict: 'mobile', ignoreDuplicates: true })
+    const inserts = rows.map(r => ({ ...r, opt_out: false }))
+    const { error } = await supabase.from('contacts').upsert(inserts, { onConflict: 'mobile', ignoreDuplicates: true })
     if (error) setAlert({ type:'error', msg: error.message })
     else {
-      setAlert({ type:'success', msg: `Import complete. ${inserts.length} rows processed.` })
+      const skipped = report.existing.length + report.fileDupes.length
+      setAlert({ type:'success', msg: `${inserts.length} contacts added. ${skipped} duplicate${skipped === 1 ? '' : 's'} skipped.` })
       load()
-      setTimeout(() => setModal(null), 1800)
+      setTimeout(closeImport, 1800)
     }
     setLoading(false)
   }
@@ -193,7 +237,7 @@ export default function Contacts() {
 
       {/* Import modal */}
       {modal === 'import' && (
-        <Modal title="Import contacts" wide onClose={() => { setModal(null); setImportText(''); setImportRows([]); setAlert(null) }}>
+        <Modal title="Import contacts" wide onClose={closeImport}>
           {alert && <div className={`alert alert-${alert.type}`}><i className={`ti ti-${alert.type==='error'?'alert-circle':'circle-check'}`}/>{alert.msg}</div>}
           <div className="import-tabs">
             <div className={`import-tab ${importTab==='paste'?'active':''}`} onClick={()=>setImportTab('paste')}>
@@ -207,21 +251,57 @@ export default function Contacts() {
           {importTab === 'paste'
             ? <div className="form-group">
                 <textarea className="form-textarea" style={{minHeight:100,fontFamily:'var(--mono)',fontSize:11.5}} placeholder="Paste contacts here — one per line…"
-                  value={importText} onChange={e => { setImportText(e.target.value); setImportRows(parseLines(e.target.value)) }}/>
+                  value={importText} onChange={e => { setImportText(e.target.value); handleRows(parseLines(e.target.value)) }}/>
               </div>
             : <div className="form-group">
                 <input type="file" accept=".csv" className="form-input" style={{padding:6}}
-                  onChange={async e => { const t = await e.target.files[0]?.text(); if(t){ setImportText(t); setImportRows(parseLines(t)) } }}/>
+                  onChange={async e => { const t = await e.target.files[0]?.text(); if(t){ setImportText(t); handleRows(parseLines(t)) } }}/>
               </div>
           }
           <div style={{display:'flex',justifyContent:'space-between',fontSize:11,color:'var(--ink-3)',marginBottom:14}}>
             <span>{importRows.length} rows detected</span>
             <span>Duplicates skipped · Opted-out excluded on send</span>
           </div>
+          {report?.checking && <div style={{fontSize:12,color:'var(--ink-3)',marginBottom:14}}>Checking for duplicates…</div>}
+          {report && !report.checking && (() => {
+            const dupes = [
+              ...report.existing.map(r => ({ ...r, reason: r.existingName ? `Already in contacts as "${r.existingName}"` : 'Already in contacts' })),
+              ...report.fileDupes.map(r => ({ ...r, reason: 'Repeated in this file' })),
+            ]
+            return (
+              <>
+                <div className={`alert ${dupes.length ? 'alert-warn' : 'alert-success'}`}>
+                  <i className={`ti ti-${dupes.length ? 'alert-triangle' : 'circle-check'}`}/>
+                  <div>
+                    <b>{fmt(report.fresh.length)} new</b> will be imported.
+                    {report.existing.length > 0 && <> <b>{fmt(report.existing.length)}</b> already in your contacts.</>}
+                    {report.fileDupes.length > 0 && <> <b>{fmt(report.fileDupes.length)}</b> repeated within the file.</>}
+                    {dupes.length > 0 && <> Duplicates are skipped.</>}
+                  </div>
+                </div>
+                {dupes.length > 0 && (
+                  <div className="tbl-wrap" style={{maxHeight:180,overflowY:'auto',marginBottom:14,border:'1px solid var(--border-2)',borderRadius:'var(--r)'}}>
+                    <table>
+                      <thead><tr><th>Mobile</th><th>Name in file</th><th>Reason</th></tr></thead>
+                      <tbody>
+                        {dupes.map((r, i) => (
+                          <tr key={i}>
+                            <td style={{fontFamily:'var(--mono)',fontSize:11.5}}>{r.mobile}</td>
+                            <td>{r.name || '—'}</td>
+                            <td style={{color:'var(--ink-2)'}}>{r.reason}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </>
+            )
+          })()}
           <div className="modal-footer">
-            <button className="btn" onClick={()=>setModal(null)}>Cancel</button>
-            <button className="btn btn-primary" onClick={doImport} disabled={loading||!importRows.length}>
-              {loading?<span className="spinner"/>:`Import ${importRows.length} contacts`}
+            <button className="btn" onClick={closeImport}>Cancel</button>
+            <button className="btn btn-primary" onClick={doImport} disabled={loading||!report||report.checking||!report.fresh.length}>
+              {loading?<span className="spinner"/>:`Import ${report && !report.checking ? report.fresh.length : 0} new contacts`}
             </button>
           </div>
         </Modal>
