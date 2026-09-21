@@ -186,12 +186,13 @@ export default function Contacts() {
         <div className="card" style={{padding:0}}>
           <div className="tbl-wrap">
             <table>
-              <thead><tr><th>Name</th><th>Mobile</th><th>City</th><th>Type</th><th>Status</th><th>Added</th><th></th></tr></thead>
+              <thead><tr><th style={{width:44}}>#</th><th>Name</th><th>Mobile</th><th>City</th><th>Type</th><th>Status</th><th>Added</th><th></th></tr></thead>
               <tbody>
                 {contacts.length === 0
-                  ? <tr><td colSpan={7}><div className="empty-state"><i className="ti ti-users"/><p>No contacts found.</p></div></td></tr>
-                  : contacts.map(c => (
+                  ? <tr><td colSpan={8}><div className="empty-state"><i className="ti ti-users"/><p>No contacts found.</p></div></td></tr>
+                  : contacts.map((c, i) => (
                   <tr key={c.id}>
+                    <td style={{color:'var(--ink-3)',fontSize:11.5}}>{i + 1}</td>
                     <td style={{fontWeight:600}}>{c.name||'—'}</td>
                     <td style={{fontFamily:'var(--mono)',fontSize:11.5,color:'var(--ink-2)'}}>{c.mobile}</td>
                     <td style={{color:'var(--ink-2)'}}>{c.city||'—'}</td>
