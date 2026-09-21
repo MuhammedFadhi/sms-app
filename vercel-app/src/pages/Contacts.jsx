@@ -108,6 +108,20 @@ export default function Contacts() {
     setLoading(false)
   }
 
+  async function deleteType() {
+    const n = stats.byType?.[filter] ?? 0
+    if (n > 0) {
+      setAlert({ type:'error', msg:`"${filter}" still has ${fmt(n)} contact${n === 1 ? '' : 's'}. Delete those contacts first, then delete the type.` })
+      return
+    }
+    if (!confirm(`Delete the type "${filter}"?`)) return
+    setAlert(null)
+    const { data, error } = await supabase.from('contact_types').delete().eq('name', filter).select()
+    if (error) setAlert({ type:'error', msg: error.code === '23503' ? `"${filter}" still has contacts. Delete those contacts first.` : error.message })
+    else if (!data.length) setAlert({ type:'error', msg:'Could not delete this type (missing permission — run the delete-policy SQL in Supabase).' })
+    else { setFilter('All'); await loadTypes() }
+  }
+
   async function addOne() {
     if (!addForm.mobile) { setAlert({ type:'error', msg:'Mobile is required' }); return }
     setLoading(true)
@@ -241,10 +255,14 @@ export default function Contacts() {
             {tabLabel(t)}
           </button>
         ))}
-        <button className="btn btn-sm" style={{marginLeft:'auto',alignSelf:'center',flexShrink:0}}
-          onClick={() => { setNewType(''); setAlert(null); setModal('type') }}>
-          <i className="ti ti-plus"/>Add type
-        </button>
+        <div style={{marginLeft:'auto',alignSelf:'center',flexShrink:0,display:'flex',gap:8}}>
+          {types.includes(filter) && (
+            <button className="btn btn-sm" onClick={deleteType}><i className="ti ti-trash"/>Delete "{filter}"</button>
+          )}
+          <button className="btn btn-sm" onClick={() => { setNewType(''); setAlert(null); setModal('type') }}>
+            <i className="ti ti-plus"/>Add type
+          </button>
+        </div>
       </div>
 
       <div className="page-content">

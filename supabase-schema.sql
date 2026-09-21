@@ -114,6 +114,7 @@ create policy "profiles_update" on public.profiles for update to authenticated u
 alter table public.contact_types enable row level security;
 create policy "types_select" on public.contact_types for select to authenticated using (true);
 create policy "types_insert" on public.contact_types for insert to authenticated with check (true);
+create policy "types_delete" on public.contact_types for delete to authenticated using (true);
 
 -- Contacts
 alter table public.contacts enable row level security;

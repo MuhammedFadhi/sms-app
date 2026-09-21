@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useMemo, useState } from 'react'
 import { supabase } from '../supabase'
 
 const COST = 0.06
@@ -27,10 +27,12 @@ async function fetchActiveContacts() {
 }
 
 // One entry per mobile number, even if it appears under several types.
+// `list` is 'all' or an array of type names.
 function pickRecipients(active, list) {
+  const wanted = list === 'all' ? null : new Set(list)
   const byMobile = new Map()
   active.forEach(c => {
-    if (list !== 'all' && c.type !== list) return
+    if (wanted && !wanted.has(c.type)) return
     const prev = byMobile.get(c.mobile)
     if (!prev) byMobile.set(c.mobile, { id: c.id, name: c.name, mobile: c.mobile })
     else if (!prev.name && c.name) prev.name = c.name
@@ -41,9 +43,9 @@ function pickRecipients(active, list) {
 export default function Compose() {
   const [mode, setMode]              = useState('bulk')   // 'bulk' | 'single'
   const [templates, setTemplates]    = useState([])
-  const [contactCounts, setCounts]   = useState({ all:0 })
+  const [pool, setPool]              = useState([])
   const [types, setTypes]            = useState(['Customer','Lead','VIP','Prospect'])
-  const [form, setForm]              = useState({ name:'', list:'all', lang:'both', useTemplate:true, templateId:'' })
+  const [form, setForm]              = useState({ name:'', types:[], lang:'both', useTemplate:true, templateId:'' })
   const [msgAr, setMsgAr]            = useState('')
   const [msgEn, setMsgEn]            = useState('')
   // Single send
@@ -57,12 +59,17 @@ export default function Compose() {
     supabase.from('contact_types').select('name').order('created_at').order('name').then(r => {
       if (!r.error && r.data?.length) setTypes(r.data.map(t => t.name))
     })
-    fetchActiveContacts().then(active => {
-      const counts = { all: pickRecipients(active, 'all').length }
-      new Set(active.map(c => c.type)).forEach(t => { counts[t] = pickRecipients(active, t).length })
-      setCounts(counts)
-    }).catch(() => {})
+    fetchActiveContacts().then(setPool).catch(() => {})
   }, [])
+
+  const listCounts = useMemo(() => {
+    const counts = { all: pickRecipients(pool, 'all').length }
+    types.forEach(t => { counts[t] = pickRecipients(pool, [t]).length })
+    return counts
+  }, [pool, types])
+  const selection = form.types.length ? form.types : 'all'
+  const bulkCount = useMemo(() => pickRecipients(pool, selection).length, [pool, form.types])
+  const toggleType = t => setForm(f => ({ ...f, types: f.types.includes(t) ? f.types.filter(x => x !== t) : [...f.types, t] }))
 
   function onTemplateChange(id) {
     const t = templates.find(t => t.id === id)
@@ -71,7 +78,7 @@ export default function Compose() {
     setMsgEn(t.body_en || '')
   }
 
-  const recipientCount = mode === 'single' ? (single.mobile ? 1 : 0) : (contactCounts[form.list] || 0)
+  const recipientCount = mode === 'single' ? (single.mobile ? 1 : 0) : bulkCount
   const arSms    = form.lang !== 'en' ? (Math.ceil(msgAr.length/70)||1) : 0
   const enSms    = form.lang !== 'ar' ? (Math.ceil(msgEn.length/160)||1) : 0
   const smsEach  = form.lang === 'both' ? arSms + enSms : form.lang === 'ar' ? arSms : enSms
@@ -80,7 +87,7 @@ export default function Compose() {
 
   function resetForm() {
     setResult(null)
-    setForm({ name:'', list:'all', lang:'both', useTemplate:true, templateId:'' })
+    setForm({ name:'', types:[], lang:'both', useTemplate:true, templateId:'' })
     setMsgAr(''); setMsgEn('')
     setSingle({ name:'', mobile:'' })
     setAlert(null)
@@ -108,14 +115,14 @@ export default function Compose() {
       if (mode === 'single') {
         contacts = [{ id: '', name: single.name || 'عميلنا الكريم', mobile: normMobile(single.mobile) }]
       } else {
-        contacts = pickRecipients(await fetchActiveContacts(), form.list)
+        contacts = pickRecipients(await fetchActiveContacts(), selection)
       }
 
       // Create campaign record
       const { data: camp, error: campErr } = await supabase.from('campaigns').insert({
         name:        form.name.trim(),
         template_id: form.templateId || null,
-        list_filter: mode === 'single' ? 'single' : form.list,
+        list_filter: mode === 'single' ? 'single' : form.types.length ? form.types.join(', ') : 'all',
         lang:        form.lang,
         total:       contacts.length,
         delivered:   0,
@@ -219,12 +226,24 @@ export default function Compose() {
                 <div className="grid-2">
                   <div className="form-group">
                     <label className="form-label">Send to</label>
-                    <select className="form-select" value={form.list} onChange={e=>setForm({...form,list:e.target.value})}>
-                      <option value="all">All contacts ({fmt(contactCounts.all)})</option>
-                      {types.map(t => (
-                        <option key={t} value={t}>{({ Customer:'Customers', Lead:'Leads' })[t] || t} ({fmt(contactCounts[t])})</option>
-                      ))}
-                    </select>
+                    <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+                      <button type="button" className={`btn btn-sm ${!form.types.length ? 'btn-primary' : ''}`} onClick={() => setForm({ ...form, types: [] })}>
+                        All contacts ({fmt(listCounts.all)})
+                      </button>
+                      {types.map(t => {
+                        const on = form.types.includes(t)
+                        return (
+                          <button key={t} type="button" className={`btn btn-sm ${on ? 'btn-primary' : ''}`} onClick={() => toggleType(t)}>
+                            {on && <i className="ti ti-check"/>}{({ Customer:'Customers', Lead:'Leads' })[t] || t} ({fmt(listCounts[t])})
+                          </button>
+                        )
+                      })}
+                    </div>
+                    <div className="form-hint">
+                      {form.types.length > 1
+                        ? `${fmt(bulkCount)} unique numbers — a number in more than one selected list gets one SMS.`
+                        : 'Select one or more lists.'}
+                    </div>
                   </div>
                   <div className="form-group">
                     <label className="form-label">Language</label>
