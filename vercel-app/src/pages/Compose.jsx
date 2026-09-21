@@ -13,6 +13,31 @@ function normMobile(m) {
   return n
 }
 
+// A number can be in several lists; opting out anywhere blocks it everywhere.
+async function fetchActiveContacts() {
+  const rows = []
+  for (let from = 0; ; from += 1000) {
+    const { data, error } = await supabase.from('contacts').select('id, name, mobile, type, opt_out').order('id').range(from, from + 999)
+    if (error) throw error
+    rows.push(...data)
+    if (data.length < 1000) break
+  }
+  const blocked = new Set(rows.filter(c => c.opt_out).map(c => c.mobile))
+  return rows.filter(c => !blocked.has(c.mobile))
+}
+
+// One entry per mobile number, even if it appears under several types.
+function pickRecipients(active, list) {
+  const byMobile = new Map()
+  active.forEach(c => {
+    if (list !== 'all' && c.type !== list) return
+    const prev = byMobile.get(c.mobile)
+    if (!prev) byMobile.set(c.mobile, { id: c.id, name: c.name, mobile: c.mobile })
+    else if (!prev.name && c.name) prev.name = c.name
+  })
+  return [...byMobile.values()]
+}
+
 export default function Compose() {
   const [mode, setMode]              = useState('bulk')   // 'bulk' | 'single'
   const [templates, setTemplates]    = useState([])
@@ -28,15 +53,12 @@ export default function Compose() {
 
   useEffect(() => {
     supabase.from('templates').select('*').order('category').order('name').then(r => setTemplates(r.data||[]))
-    supabase.from('contacts').select('type, opt_out').then(r => {
-      const all = (r.data||[]).filter(c => !c.opt_out)
-      setCounts({
-        all:      all.length,
-        Customer: all.filter(c=>c.type==='Customer').length,
-        Lead:     all.filter(c=>c.type==='Lead').length,
-        VIP:      all.filter(c=>c.type==='VIP').length,
-      })
-    })
+    fetchActiveContacts().then(active => setCounts({
+      all:      pickRecipients(active, 'all').length,
+      Customer: pickRecipients(active, 'Customer').length,
+      Lead:     pickRecipients(active, 'Lead').length,
+      VIP:      pickRecipients(active, 'VIP').length,
+    })).catch(() => {})
   }, [])
 
   function onTemplateChange(id) {
@@ -83,10 +105,7 @@ export default function Compose() {
       if (mode === 'single') {
         contacts = [{ id: '', name: single.name || 'عميلنا الكريم', mobile: normMobile(single.mobile) }]
       } else {
-        let q = supabase.from('contacts').select('id, name, mobile').eq('opt_out', false)
-        if (form.list !== 'all') q = q.eq('type', form.list)
-        const { data } = await q
-        contacts = data || []
+        contacts = pickRecipients(await fetchActiveContacts(), form.list)
       }
 
       // Create campaign record

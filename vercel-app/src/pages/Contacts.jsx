@@ -28,6 +28,19 @@ function parseLines(text) {
   return rows
 }
 
+function applyFilters(q, { filter, search, city }) {
+  if (filter !== 'All' && filter !== 'opt_out') q = q.eq('type', filter)
+  if (filter === 'opt_out') q = q.eq('opt_out', true)
+  if (search) q = q.or(`name.ilike.%${search}%,mobile.ilike.%${search}%`)
+  if (city)   q = q.eq('city', city)
+  return q
+}
+
+const csvCell = v => {
+  const s = String(v ?? '')
+  return /[",\r\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
 export default function Contacts() {
   const [contacts, setContacts] = useState([])
   const [stats, setStats]       = useState({})
@@ -42,15 +55,14 @@ export default function Contacts() {
   const [loading, setLoading]   = useState(false)
   const [alert, setAlert]       = useState(null)
   const [report, setReport]     = useState(null)
+  const [exporting, setExporting] = useState(false)
   const analyzeRun              = useRef(0)
 
   const load = useCallback(async () => {
-    let q = supabase.from('contacts').select('*').order('created_at', { ascending: false })
-    if (filter !== 'All' && filter !== 'opt_out') q = q.eq('type', filter)
-    if (filter === 'opt_out') q = q.eq('opt_out', true)
-    if (search) q = q.or(`name.ilike.%${search}%,mobile.ilike.%${search}%`)
-    if (city)   q = q.eq('city', city)
-    const { data } = await q
+    const { data } = await applyFilters(
+      supabase.from('contacts').select('*').order('created_at', { ascending: false }),
+      { filter, search, city }
+    )
     setContacts(data || [])
 
     const countOf = async apply => {
@@ -78,10 +90,40 @@ export default function Contacts() {
     if (!addForm.mobile) { setAlert({ type:'error', msg:'Mobile is required' }); return }
     setLoading(true)
     const mobile = normMobile(addForm.mobile)
-    const { error } = await supabase.from('contacts').insert({ ...addForm, mobile, opt_out: false })
-    if (error) setAlert({ type:'error', msg: error.code === '23505' ? 'This number already exists.' : error.message })
+    const { data: blocked } = await supabase.from('contacts').select('id').eq('mobile', mobile).eq('opt_out', true).limit(1)
+    const { error } = await supabase.from('contacts').insert({ ...addForm, mobile, opt_out: !!blocked?.length })
+    if (error) setAlert({ type:'error', msg: error.code === '23505' ? `This number is already in the ${addForm.type} list.` : error.message })
     else { setModal(null); load() }
     setLoading(false)
+  }
+
+  async function exportCsv() {
+    setExporting(true); setAlert(null)
+    const rows = []
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await applyFilters(
+        supabase.from('contacts').select('*').order('created_at', { ascending: false }).order('id'),
+        { filter, search, city }
+      ).range(from, from + 999)
+      if (error) { setAlert({ type:'error', msg: 'Export failed: ' + error.message }); setExporting(false); return }
+      rows.push(...data)
+      if (data.length < 1000) break
+    }
+    if (!rows.length) { setAlert({ type:'error', msg:'Nothing to export.' }); setExporting(false); return }
+
+    const header = ['Name', 'Mobile', 'City', 'Type', 'Notes', 'Status', 'Added']
+    const lines  = rows.map(c => [
+      c.name, c.mobile, c.city, c.type, c.notes, c.opt_out ? 'Opted out' : 'Active', c.created_at ? c.created_at.slice(0, 10) : '',
+    ].map(csvCell).join(','))
+    const blob = new Blob(['﻿' + [header.join(','), ...lines].join('\r\n')], { type: 'text/csv;charset=utf-8' })
+    const url  = URL.createObjectURL(blob)
+    const a    = document.createElement('a')
+    a.href = url
+    a.download = `contacts-${(filter === 'opt_out' ? 'opted-out' : filter).toLowerCase()}-${new Date().toISOString().slice(0, 10)}.csv`
+    document.body.appendChild(a); a.click(); a.remove()
+    URL.revokeObjectURL(url)
+    setAlert({ type:'success', msg: `Exported ${rows.length} contacts.` })
+    setExporting(false)
   }
 
   async function analyze(rows) {
@@ -91,27 +133,35 @@ export default function Contacts() {
     await new Promise(r => setTimeout(r, 300))
     if (run !== analyzeRun.current) return
 
-    const seen = new Set(), fresh = [], fileDupes = []
+    const seen = new Set(), unique = [], fileDupes = []
     rows.forEach(r => {
       const mobile = normMobile(r.mobile)
-      if (seen.has(mobile)) fileDupes.push({ ...r, mobile })
-      else { seen.add(mobile); fresh.push({ ...r, mobile }) }
+      const key = `${mobile}|${r.type}`
+      if (seen.has(key)) fileDupes.push({ ...r, mobile })
+      else { seen.add(key); unique.push({ ...r, mobile }) }
     })
 
-    const existingByMobile = new Map()
-    const mobiles = fresh.map(r => r.mobile)
+    const existingByKey = new Map(), knownMobiles = new Set(), optedOut = new Set()
+    const mobiles = [...new Set(unique.map(r => r.mobile))]
     for (let i = 0; i < mobiles.length; i += 200) {
-      const { data, error } = await supabase.from('contacts').select('mobile, name').in('mobile', mobiles.slice(i, i + 200))
+      const { data, error } = await supabase.from('contacts').select('mobile, type, name, opt_out').in('mobile', mobiles.slice(i, i + 200))
       if (run !== analyzeRun.current) return
       if (error) { setReport(null); setAlert({ type:'error', msg: 'Could not check for duplicates: ' + error.message }); return }
-      ;(data || []).forEach(d => existingByMobile.set(d.mobile, d.name))
+      ;(data || []).forEach(d => {
+        existingByKey.set(`${d.mobile}|${d.type}`, d.name)
+        knownMobiles.add(d.mobile)
+        if (d.opt_out) optedOut.add(d.mobile)
+      })
     }
 
+    const isExisting = r => existingByKey.has(`${r.mobile}|${r.type}`)
+    const fresh = unique.filter(r => !isExisting(r)).map(r => ({ ...r, optOut: optedOut.has(r.mobile) }))
     setReport({
       checking:  false,
-      fresh:     fresh.filter(r => !existingByMobile.has(r.mobile)),
-      existing:  fresh.filter(r => existingByMobile.has(r.mobile)).map(r => ({ ...r, existingName: existingByMobile.get(r.mobile) })),
+      fresh,
+      existing:  unique.filter(isExisting).map(r => ({ ...r, existingName: existingByKey.get(`${r.mobile}|${r.type}`) })),
       fileDupes,
+      alsoOther: fresh.filter(r => knownMobiles.has(r.mobile)).length,
     })
   }
 
@@ -129,8 +179,8 @@ export default function Contacts() {
     const rows = report?.fresh || []
     if (!rows.length) { setAlert({ type:'error', msg:'No new contacts to import' }); return }
     setLoading(true); setAlert(null)
-    const inserts = rows.map(r => ({ ...r, opt_out: false }))
-    const { error } = await supabase.from('contacts').upsert(inserts, { onConflict: 'mobile', ignoreDuplicates: true })
+    const inserts = rows.map(({ optOut, ...r }) => ({ ...r, opt_out: optOut }))
+    const { error } = await supabase.from('contacts').upsert(inserts, { onConflict: 'mobile,type', ignoreDuplicates: true })
     if (error) setAlert({ type:'error', msg: error.message })
     else {
       const skipped = report.existing.length + report.fileDupes.length
@@ -147,9 +197,9 @@ export default function Contacts() {
     load()
   }
 
-  async function optOut(id) {
-    if (!confirm('Mark as opted out? They will be excluded from all future campaigns.')) return
-    await supabase.from('contacts').update({ opt_out: true }).eq('id', id)
+  async function optOut(c) {
+    if (!confirm('Mark as opted out? They will be excluded from all future campaigns, in every list this number is in.')) return
+    await supabase.from('contacts').update({ opt_out: true }).eq('mobile', c.mobile)
     load()
   }
 
@@ -182,6 +232,9 @@ export default function Contacts() {
             {['Dammam','Al Khobar','Jubail','Dhahran','Riyadh','Jeddah'].map(c=><option key={c}>{c}</option>)}
           </select>
           <button className="btn btn-sm" onClick={() => setModal('import')}><i className="ti ti-upload"/>Import</button>
+          <button className="btn btn-sm" onClick={exportCsv} disabled={exporting}>
+            {exporting ? <span className="spinner"/> : <><i className="ti ti-download"/>Export</>}
+          </button>
           <button className="btn btn-primary btn-sm" onClick={() => { setAddForm({name:'',mobile:'',city:'',type:'Customer',notes:''}); setAlert(null); setModal('add') }}>
             <i className="ti ti-plus"/>Add contact
           </button>
@@ -205,7 +258,7 @@ export default function Contacts() {
                     <td style={{color:'var(--ink-3)',fontSize:11}}>{fmtD(c.created_at)}</td>
                     <td>
                       <div style={{display:'flex',gap:4}}>
-                        {!c.opt_out && <button className="btn btn-ghost btn-sm" style={{fontSize:10.5}} onClick={()=>optOut(c.id)}>Opt-out</button>}
+                        {!c.opt_out && <button className="btn btn-ghost btn-sm" style={{fontSize:10.5}} onClick={()=>optOut(c)}>Opt-out</button>}
                         <button className="btn btn-ghost btn-sm" style={{padding:'3px 7px'}} onClick={()=>del(c.id)}><i className="ti ti-trash" style={{fontSize:11}}/></button>
                       </div>
                     </td>
@@ -270,8 +323,8 @@ export default function Contacts() {
           {report?.checking && <div style={{fontSize:12,color:'var(--ink-3)',marginBottom:14}}>Checking for duplicates…</div>}
           {report && !report.checking && (() => {
             const dupes = [
-              ...report.existing.map(r => ({ ...r, reason: r.existingName ? `Already in contacts as "${r.existingName}"` : 'Already in contacts' })),
-              ...report.fileDupes.map(r => ({ ...r, reason: 'Repeated in this file' })),
+              ...report.existing.map(r => ({ ...r, reason: `Already in ${r.type} list` + (r.existingName ? ` as "${r.existingName}"` : '') })),
+              ...report.fileDupes.map(r => ({ ...r, reason: `Repeated in this file (${r.type})` })),
             ]
             return (
               <>
@@ -279,9 +332,10 @@ export default function Contacts() {
                   <i className={`ti ti-${dupes.length ? 'alert-triangle' : 'circle-check'}`}/>
                   <div>
                     <b>{fmt(report.fresh.length)} new</b> will be imported.
-                    {report.existing.length > 0 && <> <b>{fmt(report.existing.length)}</b> already in your contacts.</>}
+                    {report.existing.length > 0 && <> <b>{fmt(report.existing.length)}</b> already in the same list.</>}
                     {report.fileDupes.length > 0 && <> <b>{fmt(report.fileDupes.length)}</b> repeated within the file.</>}
                     {dupes.length > 0 && <> Duplicates are skipped.</>}
+                    {report.alsoOther > 0 && <> <b>{fmt(report.alsoOther)}</b> of the new ones already exist under a different type and will be added to this type too.</>}
                   </div>
                 </div>
                 {dupes.length > 0 && (

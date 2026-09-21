@@ -36,12 +36,13 @@ create trigger on_auth_user_created
 create table if not exists public.contacts (
   id          uuid primary key default uuid_generate_v4(),
   name        text    not null default '',
-  mobile      text    not null unique,
+  mobile      text    not null,
   city        text    not null default '',
   type        text    not null default 'Lead' check (type in ('Customer','Lead','VIP','Prospect')),
   notes       text    not null default '',
   opt_out     boolean not null default false,
-  created_at  timestamptz not null default now()
+  created_at  timestamptz not null default now(),
+  constraint contacts_mobile_type_key unique (mobile, type)
 );
 create index if not exists idx_contacts_mobile  on public.contacts(mobile);
 create index if not exists idx_contacts_type    on public.contacts(type);
