@@ -155,7 +155,7 @@ export default function Contacts() {
   }
 
   return (
-    <div>
+    <div className="page-wrap">
       <div className="subnav">
         {['All','Customer','Lead','VIP','opt_out'].map(t => (
           <button key={t} className={`subnav-tab ${filter===t?'active':''}`} onClick={() => setFilter(t)}>

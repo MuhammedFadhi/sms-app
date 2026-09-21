@@ -54,7 +54,7 @@ export default function Templates() {
   const langLabel = v => LANGS.find(l => l.v === v)?.l || v
 
   return (
-    <div>
+    <div className="page-wrap">
       <div className="subnav">
         {CATS.map(c => (
           <button key={c} className={`subnav-tab ${cat===c?'active':''}`} onClick={() => setCat(c)}>{c}</button>
