@@ -32,13 +32,25 @@ create trigger on_auth_user_created
   after insert on auth.users
   for each row execute procedure public.handle_new_user();
 
+-- ── Contact types (editable from the Contacts page) ───────────
+create table if not exists public.contact_types (
+  name        text primary key,
+  created_at  timestamptz not null default now()
+);
+insert into public.contact_types (name, created_at) values
+  ('Customer', now()),
+  ('Lead',     now() + interval '1 second'),
+  ('VIP',      now() + interval '2 seconds'),
+  ('Prospect', now() + interval '3 seconds')
+on conflict do nothing;
+
 -- ── Contacts ───────────────────────────────────────────────────
 create table if not exists public.contacts (
   id          uuid primary key default uuid_generate_v4(),
   name        text    not null default '',
   mobile      text    not null,
   city        text    not null default '',
-  type        text    not null default 'Lead' check (type in ('Customer','Lead','VIP','Prospect')),
+  type        text    not null default 'Lead' references public.contact_types(name) on update cascade,
   notes       text    not null default '',
   opt_out     boolean not null default false,
   created_at  timestamptz not null default now(),
@@ -97,6 +109,11 @@ create index if not exists idx_logs_campaign on public.send_logs(campaign_id);
 alter table public.profiles enable row level security;
 create policy "profiles_select" on public.profiles for select to authenticated using (true);
 create policy "profiles_update" on public.profiles for update to authenticated using (auth.uid() = id) with check (auth.uid() = id);
+
+-- Contact types
+alter table public.contact_types enable row level security;
+create policy "types_select" on public.contact_types for select to authenticated using (true);
+create policy "types_insert" on public.contact_types for insert to authenticated with check (true);
 
 -- Contacts
 alter table public.contacts enable row level security;

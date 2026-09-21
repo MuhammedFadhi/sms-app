@@ -2,7 +2,7 @@ import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { supabase } from '../supabase'
 import Modal from '../components/Modal'
 
-const TYPES = ['All','Customer','Lead','VIP','Prospect']
+const DEFAULT_TYPES = ['Customer','Lead','VIP','Prospect']
 const fmtD  = d => d ? new Date(d).toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'}) : '—'
 const fmt   = n => Number(n||0).toLocaleString()
 
@@ -56,7 +56,29 @@ export default function Contacts() {
   const [alert, setAlert]       = useState(null)
   const [report, setReport]     = useState(null)
   const [exporting, setExporting] = useState(false)
+  const [types, setTypes]       = useState(DEFAULT_TYPES)
+  const [newType, setNewType]   = useState('')
   const analyzeRun              = useRef(0)
+
+  const loadTypes = useCallback(async () => {
+    const { data, error } = await supabase.from('contact_types').select('name').order('created_at').order('name')
+    if (!error && data?.length) setTypes(data.map(t => t.name))
+  }, [])
+
+  useEffect(() => { loadTypes() }, [loadTypes])
+
+  const loadStats = useCallback(async () => {
+    const countOf = async apply => {
+      const { count } = await apply(supabase.from('contacts').select('*', { count: 'exact', head: true }))
+      return count || 0
+    }
+    const [total, opted_out, ...perType] = await Promise.all([
+      countOf(q => q),
+      countOf(q => q.eq('opt_out', true)),
+      ...types.map(t => countOf(q => q.eq('type', t))),
+    ])
+    setStats({ total, opted_out, byType: Object.fromEntries(types.map((t, i) => [t, perType[i]])) })
+  }, [types])
 
   const load = useCallback(async () => {
     const { data } = await applyFilters(
@@ -64,26 +86,26 @@ export default function Contacts() {
       { filter, search, city }
     )
     setContacts(data || [])
-
-    const countOf = async apply => {
-      const { count } = await apply(supabase.from('contacts').select('*', { count: 'exact', head: true }))
-      return count || 0
-    }
-    const [total, customers, leads, vip, opted_out] = await Promise.all([
-      countOf(q => q),
-      countOf(q => q.eq('type', 'Customer')),
-      countOf(q => q.eq('type', 'Lead')),
-      countOf(q => q.eq('type', 'VIP')),
-      countOf(q => q.eq('opt_out', true)),
-    ])
-    setStats({ total, customers, leads, vip, opted_out })
-  }, [filter, search, city])
+    await loadStats()
+  }, [filter, search, city, loadStats])
 
   useEffect(() => { load() }, [load])
 
   const tabLabel = t => {
-    const counts = { All: stats.total, Customer: stats.customers, Lead: stats.leads, VIP: stats.vip, opt_out: stats.opted_out }
-    return `${t === 'opt_out' ? 'Opted out' : t} (${fmt(counts[t] || 0)})`
+    const n = t === 'All' ? stats.total : t === 'opt_out' ? stats.opted_out : stats.byType?.[t]
+    return `${t === 'opt_out' ? 'Opted out' : t} (${fmt(n)})`
+  }
+
+  async function addType() {
+    const name = newType.trim().replace(/\s+/g, ' ')
+    if (!name) { setAlert({ type:'error', msg:'Enter a type name' }); return }
+    if (['all', 'opted out', 'opt_out'].includes(name.toLowerCase())) { setAlert({ type:'error', msg:`"${name}" is a reserved name.` }); return }
+    if (types.some(t => t.toLowerCase() === name.toLowerCase())) { setAlert({ type:'error', msg:`The type "${name}" already exists.` }); return }
+    setLoading(true); setAlert(null)
+    const { error } = await supabase.from('contact_types').insert({ name })
+    if (error) setAlert({ type:'error', msg: error.message })
+    else { setModal(null); await loadTypes(); setFilter(name) }
+    setLoading(false)
   }
 
   async function addOne() {
@@ -133,12 +155,14 @@ export default function Contacts() {
     await new Promise(r => setTimeout(r, 300))
     if (run !== analyzeRun.current) return
 
-    const seen = new Set(), unique = [], fileDupes = []
+    const seen = new Set(), unique = [], fileDupes = [], badType = []
     rows.forEach(r => {
       const mobile = normMobile(r.mobile)
-      const key = `${mobile}|${r.type}`
-      if (seen.has(key)) fileDupes.push({ ...r, mobile })
-      else { seen.add(key); unique.push({ ...r, mobile }) }
+      const type = types.find(t => t.toLowerCase() === r.type.trim().toLowerCase())
+      if (!type) { badType.push({ ...r, mobile }); return }
+      const key = `${mobile}|${type}`
+      if (seen.has(key)) fileDupes.push({ ...r, mobile, type })
+      else { seen.add(key); unique.push({ ...r, mobile, type }) }
     })
 
     const existingByKey = new Map(), knownMobiles = new Set(), optedOut = new Set()
@@ -161,6 +185,7 @@ export default function Contacts() {
       fresh,
       existing:  unique.filter(isExisting).map(r => ({ ...r, existingName: existingByKey.get(`${r.mobile}|${r.type}`) })),
       fileDupes,
+      badType,
       alsoOther: fresh.filter(r => knownMobiles.has(r.mobile)).length,
     })
   }
@@ -183,8 +208,8 @@ export default function Contacts() {
     const { error } = await supabase.from('contacts').upsert(inserts, { onConflict: 'mobile,type', ignoreDuplicates: true })
     if (error) setAlert({ type:'error', msg: error.message })
     else {
-      const skipped = report.existing.length + report.fileDupes.length
-      setAlert({ type:'success', msg: `${inserts.length} contacts added. ${skipped} duplicate${skipped === 1 ? '' : 's'} skipped.` })
+      const skipped = report.existing.length + report.fileDupes.length + report.badType.length
+      setAlert({ type:'success', msg: `${inserts.length} contacts added. ${skipped} row${skipped === 1 ? '' : 's'} skipped.` })
       load()
       setTimeout(closeImport, 1800)
     }
@@ -211,11 +236,15 @@ export default function Contacts() {
   return (
     <div className="page-wrap">
       <div className="subnav">
-        {['All','Customer','Lead','VIP','opt_out'].map(t => (
+        {['All', ...types, 'opt_out'].map(t => (
           <button key={t} className={`subnav-tab ${filter===t?'active':''}`} onClick={() => setFilter(t)}>
             {tabLabel(t)}
           </button>
         ))}
+        <button className="btn btn-sm" style={{marginLeft:'auto',alignSelf:'center',flexShrink:0}}
+          onClick={() => { setNewType(''); setAlert(null); setModal('type') }}>
+          <i className="ti ti-plus"/>Add type
+        </button>
       </div>
 
       <div className="page-content">
@@ -281,7 +310,7 @@ export default function Contacts() {
             <div className="form-group"><label className="form-label">City</label><input className="form-input" value={addForm.city} onChange={e=>setAddForm({...addForm,city:e.target.value})} placeholder="Dammam"/></div>
             <div className="form-group"><label className="form-label">Type</label>
               <select className="form-select" value={addForm.type} onChange={e=>setAddForm({...addForm,type:e.target.value})}>
-                {['Customer','Lead','VIP','Prospect'].map(t=><option key={t}>{t}</option>)}
+                {types.map(t=><option key={t}>{t}</option>)}
               </select>
             </div>
           </div>
@@ -289,6 +318,22 @@ export default function Contacts() {
           <div className="modal-footer">
             <button className="btn" onClick={()=>setModal(null)}>Cancel</button>
             <button className="btn btn-primary" onClick={addOne} disabled={loading}>{loading?<span className="spinner"/>:'Add contact'}</button>
+          </div>
+        </Modal>
+      )}
+
+      {/* Add type modal */}
+      {modal === 'type' && (
+        <Modal title="Add contact type" onClose={() => { setModal(null); setAlert(null) }}>
+          {alert && <div className={`alert alert-${alert.type}`}><i className="ti ti-alert-circle"/>{alert.msg}</div>}
+          <div className="form-group">
+            <label className="form-label">Type name</label>
+            <input className="form-input" autoFocus maxLength={30} placeholder="e.g. Distributor" value={newType}
+              onChange={e => setNewType(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') addType() }}/>
+          </div>
+          <div className="modal-footer">
+            <button className="btn" onClick={() => { setModal(null); setAlert(null) }}>Cancel</button>
+            <button className="btn btn-primary" onClick={addType} disabled={loading}>{loading ? <span className="spinner"/> : 'Add type'}</button>
           </div>
         </Modal>
       )}
@@ -325,6 +370,7 @@ export default function Contacts() {
             const dupes = [
               ...report.existing.map(r => ({ ...r, reason: `Already in ${r.type} list` + (r.existingName ? ` as "${r.existingName}"` : '') })),
               ...report.fileDupes.map(r => ({ ...r, reason: `Repeated in this file (${r.type})` })),
+              ...report.badType.map(r => ({ ...r, reason: `Unknown type "${r.type}" — add it with "Add type" first` })),
             ]
             return (
               <>
@@ -334,7 +380,8 @@ export default function Contacts() {
                     <b>{fmt(report.fresh.length)} new</b> will be imported.
                     {report.existing.length > 0 && <> <b>{fmt(report.existing.length)}</b> already in the same list.</>}
                     {report.fileDupes.length > 0 && <> <b>{fmt(report.fileDupes.length)}</b> repeated within the file.</>}
-                    {dupes.length > 0 && <> Duplicates are skipped.</>}
+                    {report.badType.length > 0 && <> <b>{fmt(report.badType.length)}</b> have an unknown type.</>}
+                    {dupes.length > 0 && <> Skipped rows are not imported.</>}
                     {report.alsoOther > 0 && <> <b>{fmt(report.alsoOther)}</b> of the new ones already exist under a different type and will be added to this type too.</>}
                   </div>
                 </div>

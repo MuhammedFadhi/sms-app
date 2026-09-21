@@ -41,7 +41,8 @@ function pickRecipients(active, list) {
 export default function Compose() {
   const [mode, setMode]              = useState('bulk')   // 'bulk' | 'single'
   const [templates, setTemplates]    = useState([])
-  const [contactCounts, setCounts]   = useState({ all:0, Customer:0, Lead:0, VIP:0 })
+  const [contactCounts, setCounts]   = useState({ all:0 })
+  const [types, setTypes]            = useState(['Customer','Lead','VIP','Prospect'])
   const [form, setForm]              = useState({ name:'', list:'all', lang:'both', useTemplate:true, templateId:'' })
   const [msgAr, setMsgAr]            = useState('')
   const [msgEn, setMsgEn]            = useState('')
@@ -53,12 +54,14 @@ export default function Compose() {
 
   useEffect(() => {
     supabase.from('templates').select('*').order('category').order('name').then(r => setTemplates(r.data||[]))
-    fetchActiveContacts().then(active => setCounts({
-      all:      pickRecipients(active, 'all').length,
-      Customer: pickRecipients(active, 'Customer').length,
-      Lead:     pickRecipients(active, 'Lead').length,
-      VIP:      pickRecipients(active, 'VIP').length,
-    })).catch(() => {})
+    supabase.from('contact_types').select('name').order('created_at').order('name').then(r => {
+      if (!r.error && r.data?.length) setTypes(r.data.map(t => t.name))
+    })
+    fetchActiveContacts().then(active => {
+      const counts = { all: pickRecipients(active, 'all').length }
+      new Set(active.map(c => c.type)).forEach(t => { counts[t] = pickRecipients(active, t).length })
+      setCounts(counts)
+    }).catch(() => {})
   }, [])
 
   function onTemplateChange(id) {
@@ -218,9 +221,9 @@ export default function Compose() {
                     <label className="form-label">Send to</label>
                     <select className="form-select" value={form.list} onChange={e=>setForm({...form,list:e.target.value})}>
                       <option value="all">All contacts ({fmt(contactCounts.all)})</option>
-                      <option value="Customer">Customers ({fmt(contactCounts.Customer)})</option>
-                      <option value="Lead">Leads ({fmt(contactCounts.Lead)})</option>
-                      <option value="VIP">VIP ({fmt(contactCounts.VIP)})</option>
+                      {types.map(t => (
+                        <option key={t} value={t}>{({ Customer:'Customers', Lead:'Leads' })[t] || t} ({fmt(contactCounts[t])})</option>
+                      ))}
                     </select>
                   </div>
                   <div className="form-group">
