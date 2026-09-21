@@ -133,12 +133,12 @@ export default function Templates() {
         <Modal title={preview.name} onClose={() => setPreview(null)}>
           {preview.body_ar && <>
             <div style={{fontSize:11,color:'var(--ink-3)',marginBottom:5}}>Arabic (AR)</div>
-            <div style={{background:'var(--surface-2)',borderRadius:'var(--r)',padding:'10px 12px',direction:'rtl',textAlign:'right',fontSize:13,lineHeight:1.6,marginBottom:4}}>{preview.body_ar}</div>
+            <div style={{background:'var(--surface-2)',borderRadius:'var(--r)',padding:'10px 12px',direction:'rtl',textAlign:'right',fontSize:13,lineHeight:1.6,marginBottom:4,whiteSpace:'pre-wrap'}}>{preview.body_ar}</div>
             <div style={{fontSize:10,color:'var(--ink-3)',textAlign:'right',marginBottom:14}}>{preview.body_ar.length} chars · {Math.ceil(preview.body_ar.length/70)||1} SMS</div>
           </>}
           {preview.body_en && <>
             <div style={{fontSize:11,color:'var(--ink-3)',marginBottom:5}}>English (EN)</div>
-            <div style={{background:'var(--surface-2)',borderRadius:'var(--r)',padding:'10px 12px',fontSize:13,lineHeight:1.6,marginBottom:4}}>{preview.body_en}</div>
+            <div style={{background:'var(--surface-2)',borderRadius:'var(--r)',padding:'10px 12px',fontSize:13,lineHeight:1.6,marginBottom:4,whiteSpace:'pre-wrap'}}>{preview.body_en}</div>
             <div style={{fontSize:10,color:'var(--ink-3)',textAlign:'right'}}>{preview.body_en.length} chars · {Math.ceil(preview.body_en.length/160)||1} SMS</div>
           </>}
           <div className="modal-footer"><button className="btn" onClick={() => setPreview(null)}>Close</button></div>

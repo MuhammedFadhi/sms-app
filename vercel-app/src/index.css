@@ -294,7 +294,7 @@ tbody tr:hover td { background: #fafbfc; }
 .phone-pill  { width: 46px; height: 5px; background: #333; border-radius: 3px; margin: 0 auto 10px; }
 .phone-screen { background: #f1f3f4; border-radius: 12px; padding: 10px; min-height: 180px; }
 .phone-from  { font-size: 9px; color: #777; text-align: center; margin-bottom: 8px; font-weight: 500; }
-.sms-bubble  { background: #fff; border-radius: 10px 10px 10px 2px; padding: 7px 9px; font-size: 9.5px; line-height: 1.55; color: #111; margin-bottom: 5px; }
+.sms-bubble  { background: #fff; border-radius: 10px 10px 10px 2px; padding: 7px 9px; font-size: 9.5px; line-height: 1.55; color: #111; margin-bottom: 5px; white-space: pre-wrap; }
 .sms-bubble.rtl { direction: rtl; text-align: right; }
 
 /* ── Send summary box ── */
